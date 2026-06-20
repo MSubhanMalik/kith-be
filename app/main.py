@@ -26,8 +26,16 @@ for router in all_routers:
 @app.on_event("startup")
 async def startup():
     await init_db()
+    from app.agent.registry import discover_tools
+    discover_tools()
 
 
 @app.get("/health")
 async def health():
     return {"status": "ok", "version": "1.0.0"}
+
+
+@app.get("/api/agent/tools")
+async def list_agent_tools():
+    from app.agent import get_tool_schemas
+    return {"tools": get_tool_schemas()}

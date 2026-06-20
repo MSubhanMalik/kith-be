@@ -4,6 +4,7 @@ from pydantic import BaseModel
 
 class CreateGoalRequest(BaseModel):
     label: str
+    color_id: Optional[str] = None
     target_date: Optional[str] = None
     weekly_hours: float = 0
     is_private: bool = False
@@ -12,6 +13,7 @@ class CreateGoalRequest(BaseModel):
 
 class UpdateGoalRequest(BaseModel):
     label: Optional[str] = None
+    color_id: Optional[str] = None
     target_date: Optional[str] = None
     current_status: Optional[str] = None
     success_metric: Optional[str] = None
@@ -43,3 +45,16 @@ class UpdateTaskRequest(BaseModel):
     scheduled_time: Optional[str] = None
     status: Optional[str] = None
     sort_order: Optional[int] = None
+
+
+class ReorderTasksRequest(BaseModel):
+    ordered_ids: List[int]
+
+
+class CreateNoteRequest(BaseModel):
+    text: str
+
+
+class UpdateNoteRequest(BaseModel):
+    text: Optional[str] = None
+    status: Optional[str] = None
