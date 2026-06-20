@@ -1,0 +1,14 @@
+{
+  "UNAUTHORIZED": { "message": "Authentication required", "status": 401 },
+  "INVALID_TOKEN": { "message": "Invalid or expired token", "status": 401 },
+  "FORBIDDEN": { "message": "You do not have permission", "status": 403 },
+  "NOT_FOUND": { "message": "Resource not found", "status": 404 },
+  "MISSING_REQUIRED_FIELDS": { "message": "Missing required fields", "status": 400 },
+  "DUPLICATE_ENTRY": { "message": "A record with this value already exists", "status": 409 },
+  "GOAL_LIMIT_REACHED": { "message": "Maximum 10 goals allowed", "status": 400 },
+  "INVALID_CREDENTIALS": { "message": "Invalid email or password", "status": 401 },
+  "USER_EXISTS": { "message": "User with this email already exists", "status": 409 },
+  "SCHEDULE_LOCKED": { "message": "This week's schedule is already locked", "status": 400 },
+  "AI_ERROR": { "message": "AI service encountered an error", "status": 502 },
+  "INTERNAL_SERVER_ERROR": { "message": "Internal server error", "status": 500 }
+}
