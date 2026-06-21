@@ -111,15 +111,35 @@ class ScheduleService:
         )
         goals = goals_result.scalars().all()
 
+        goal_created_dates = {}
+        for g in goals:
+            goal_created_dates[g.id] = g.created_at
+
         day_order = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
 
         for goal in goals:
+            created = goal_created_dates.get(goal.id)
+            if created:
+                weeks_since = max(1, ((week_date - created.date()).days // 7) + 1) if hasattr(created, 'date') else 1
+            else:
+                weeks_since = 1
+
             tasks_result = await self.db.execute(
                 select(Task)
-                .where(Task.goal_id == goal.id, Task.user_id == self.user.id, Task.status == "PENDING")
-                .order_by(Task.sort_order)
+                .where(
+                    Task.goal_id == goal.id,
+                    Task.user_id == self.user.id,
+                    Task.status.in_(["PENDING", "IN_PROGRESS"]),
+                )
+                .order_by(Task.week_number.nulls_last(), Task.sort_order)
             )
-            tasks = tasks_result.scalars().all()
+            all_tasks = tasks_result.scalars().all()
+
+            tasks = [
+                t for t in all_tasks
+                if t.week_number is None or t.week_number <= weeks_since
+            ]
+
             if not tasks:
                 continue
 

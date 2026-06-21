@@ -70,39 +70,57 @@ class AIService:
         ai_run = await self.run("GOAL_BREAKDOWN", json.dumps({"goal_id": goal_id, "label": goal.label}), "GOAL", goal_id)
         start = timer.time()
 
-        prompt = f"""Break this goal into concrete, actionable tasks for a weekly schedule.
+        weeks_to_target = 4
+        if goal.target_date:
+            from datetime import date as dateclass
+            days_left = (goal.target_date - dateclass.today()).days
+            weeks_to_target = max(1, min(12, days_left // 7))
+
+        description = goal.current_status or ""
+        success = goal.success_metric or ""
+
+        prompt = f"""Create a multi-week plan to achieve this goal. Break it into weekly milestones, then into daily tasks.
 
 Goal: {goal.label}
+{f"Description: {description}" if description else ""}
+{f"Success looks like: {success}" if success else ""}
 Target date: {goal.target_date or "No deadline set"}
+Weeks available: {weeks_to_target}
 Weekly hours available: {float(goal.weekly_hours or 0)}h
-Current status: {goal.current_status or "Just starting"}
 
 Rules:
-- Each task should be completable in a single sitting (30-180 minutes)
-- Include a time estimate in minutes for each task
-- Assign each task a day of the week (Mon, Tue, Wed, Thu, Fri, Sat)
-- Spread tasks across the week, not all on one day
-- Order tasks by what should be done first
-- Be specific: "Build user auth with JWT" not "Work on backend"
-- Include an output definition: what does "done" look like
-- Generate 5-12 tasks depending on complexity
+- Create a plan spanning {min(weeks_to_target, 6)} weeks
+- Each week should have 3-6 tasks that build toward the goal
+- Tasks in week 1 are foundations, later weeks build on earlier work
+- Each task: completable in one sitting (30-120 minutes)
+- Assign each task a day (Mon, Tue, Wed, Thu, Fri, Sat) — spread across the week
+- Assign each task a start time in HH:MM 24-hour format (e.g. "09:00", "14:30"). Spread tasks throughout the day, don't stack them all at the same time.
+- Be specific and actionable: "Read chapter 1 of [topic]" not "Study"
+- Include what "done" looks like for each task
+- Earlier weeks = learning/setup, later weeks = building/executing
 
-Return a JSON object with a "tasks" key containing an array:
-{{"tasks": [{{"text": "...", "description": "...", "output": "...", "estimatedMinutes": 60, "dayOfWeek": "Mon"}}]}}"""
+Return JSON:
+{{"tasks": [{{"text": "...", "description": "...", "output": "...", "estimatedMinutes": 60, "dayOfWeek": "Mon", "weekNumber": 1, "scheduledTime": "09:00"}}]}}"""
 
         llm = LLMClient()
         try:
             response = await llm.chat_with_fallback(
                 messages=[
-                    {"role": "system", "content": "You are a project planning assistant. Return only valid JSON."},
+                    {"role": "system", "content": "You are a project planning assistant. Return ONLY a JSON object, no other text. Keep task text under 10 words. Keep descriptions under 20 words. Be concise."},
                     {"role": "user", "content": prompt},
                 ],
                 model=settings.OPENROUTER_MODEL_SMART,
-                response_format={"type": "json_object"},
                 temperature=0.5,
+                max_tokens=4096,
             )
 
-            content = response.choices[0].message.content
+            content = response.choices[0].message.content or ""
+            content = content.strip()
+            if content.startswith("```"):
+                content = content.split("\n", 1)[-1] if "\n" in content else content[3:]
+                if content.endswith("```"):
+                    content = content[:-3].strip()
+
             tasks_data = json.loads(content)
             if isinstance(tasks_data, dict):
                 tasks_data = tasks_data.get("tasks", [])
@@ -116,6 +134,8 @@ Return a JSON object with a "tasks" key containing an array:
                     "output": t.get("output"),
                     "estimated_minutes": t.get("estimatedMinutes", 60),
                     "day_of_week": t.get("dayOfWeek"),
+                    "scheduled_time": t.get("scheduledTime"),
+                    "week_number": t.get("weekNumber", 1),
                     "is_auto_generated": True,
                 })
                 created.append(task_result)

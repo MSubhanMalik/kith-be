@@ -36,6 +36,7 @@ class TaskService:
             day_of_week=data.get("day_of_week"),
             scheduled_time=data.get("scheduled_time"),
             estimated_minutes=data.get("estimated_minutes"),
+            week_number=data.get("week_number"),
             is_auto_generated=data.get("is_auto_generated", False),
             sort_order=next_order,
         )
