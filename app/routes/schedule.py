@@ -4,6 +4,7 @@ from app.middleware import Context, get_context
 from app.schemas import (
     GenerateScheduleRequest, MoveTaskRequest,
     CreateLifeBlockRequest, UpdateLifeBlockRequest, StandardResponse,
+    UpdateSummaryRequest,
 )
 from app.services.scheduler import ScheduleService
 
@@ -36,6 +37,13 @@ async def reschedule(week_of: str, ctx: Context = Depends(get_context)):
     service = ScheduleService(ctx)
     result = await service.reschedule_week(week_of)
     return StandardResponse(data=result)
+
+
+@router.patch("/week/{week_of}/summary", response_model=StandardResponse)
+async def update_summary(week_of: str, body: UpdateSummaryRequest, ctx: Context = Depends(get_context)):
+    service = ScheduleService(ctx)
+    await service.update_summary(week_of, body.summary_line)
+    return StandardResponse(data=None, message="Summary saved")
 
 
 @router.patch("/block/{block_id}/move", response_model=StandardResponse)

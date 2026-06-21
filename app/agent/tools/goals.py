@@ -66,17 +66,8 @@ async def list_tasks(goal_id: int, ctx=None):
     return await service.list_tasks(goal_id)
 
 
-@tool(description="Break a goal into multiple concrete tasks with time estimates. Returns the created tasks.")
-async def break_down_goal(goal_id: int, tasks: list, ctx=None):
-    service = TaskService(ctx)
-    created = []
-    for t in tasks:
-        result = await service.create_task(goal_id, {
-            "text": t.get("text", ""),
-            "description": t.get("description"),
-            "output": t.get("output"),
-            "estimated_minutes": t.get("estimatedMinutes"),
-            "day_of_week": t.get("dayOfWeek"),
-        })
-        created.append(result)
-    return created
+@tool(description="Use AI to break a goal into concrete weekly tasks with time estimates. Call this when the user asks to break down, plan, or decompose a goal.")
+async def break_down_goal(goal_id: int, ctx=None):
+    from app.services.ai import AIService
+    service = AIService(ctx)
+    return await service.break_goal_into_tasks(goal_id)

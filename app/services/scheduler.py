@@ -3,8 +3,18 @@ from datetime import datetime, date, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from app.models import LifeBlock, LifeBlockDay, WeekSchedule, ScheduleBlock
+from app.models import LifeBlock, LifeBlockDay, WeekSchedule, ScheduleBlock, Goal, Task
 from app.utils import get_error
+
+
+def _time_to_minutes(t: str) -> int:
+    h, m = t.split(":")
+    return int(h) * 60 + int(m)
+
+
+def _minutes_to_time(m: int) -> str:
+    m = m % (24 * 60)
+    return f"{m // 60:02d}:{m % 60:02d}"
 
 
 class ScheduleService:
@@ -27,13 +37,19 @@ class ScheduleService:
     async def generate_schedule(self, week_of: str):
         week_date = datetime.strptime(week_of, "%Y-%m-%d").date()
 
-        existing = await self.db.execute(
+        existing_result = await self.db.execute(
             select(WeekSchedule).where(
                 WeekSchedule.user_id == self.user.id, WeekSchedule.week_of == week_date
             )
         )
-        if existing.scalar_one_or_none():
-            raise get_error("DUPLICATE_ENTRY")
+        existing = existing_result.scalar_one_or_none()
+        if existing:
+            from app.models import ScheduleBlock as SB
+            await self.db.execute(
+                SB.__table__.delete().where(SB.week_schedule_id == existing.id)
+            )
+            await self.db.delete(existing)
+            await self.db.flush()
 
         schedule = WeekSchedule(
             user_id=self.user.id,
@@ -52,15 +68,17 @@ class ScheduleService:
 
         day_map = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
 
+        life_blocks_by_day = {}
         for lb in life_blocks:
             for lb_day in lb.days:
+                day_key = lb_day.day.upper()[:3]
                 day_offset = day_map.get(lb_day.day.lower(), 0)
                 block_date = week_date + timedelta(days=day_offset)
                 block = ScheduleBlock(
                     week_schedule_id=schedule.id,
                     life_block_id=lb.id,
                     type="LIFE_BLOCK",
-                    day=lb_day.day.upper()[:3],
+                    day=day_key,
                     block_date=block_date,
                     start_time=lb.start_time,
                     end_time=lb.end_time,
@@ -68,6 +86,11 @@ class ScheduleService:
                     status="SCHEDULED",
                 )
                 self.db.add(block)
+                life_blocks_by_day.setdefault(day_key, []).append((lb.start_time, lb.end_time))
+
+        await self.db.flush()
+
+        await self._place_goal_tasks(schedule, week_date, life_blocks_by_day, day_map)
 
         await self.db.commit()
 
@@ -77,6 +100,128 @@ class ScheduleService:
             .where(WeekSchedule.id == schedule.id)
         )
         return self._week_to_dict(result.scalar_one())
+
+    async def _place_goal_tasks(self, schedule, week_date, life_blocks_by_day, day_map):
+        free_slots = self._compute_free_slots(life_blocks_by_day)
+
+        goals_result = await self.db.execute(
+            select(Goal)
+            .where(Goal.user_id == self.user.id, Goal.status == "ACTIVE")
+            .order_by(Goal.rank)
+        )
+        goals = goals_result.scalars().all()
+
+        day_order = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
+
+        for goal in goals:
+            tasks_result = await self.db.execute(
+                select(Task)
+                .where(Task.goal_id == goal.id, Task.user_id == self.user.id, Task.status == "PENDING")
+                .order_by(Task.sort_order)
+            )
+            tasks = tasks_result.scalars().all()
+            if not tasks:
+                continue
+
+            weekly_budget = float(goal.weekly_hours or 0) * 60
+            if weekly_budget <= 0:
+                weekly_budget = len(tasks) * 60
+
+            max_per_day = weekly_budget * 0.4
+            day_used = {d: 0 for d in day_order}
+            budget_used = 0
+
+            for task in tasks:
+                if budget_used >= weekly_budget:
+                    break
+
+                duration = task.estimated_minutes or 60
+
+                placed = False
+                for day in day_order:
+                    if day_used[day] + duration > max_per_day:
+                        continue
+
+                    slots = free_slots.get(day, [])
+                    for si, (slot_start, slot_end) in enumerate(slots):
+                        slot_minutes = _time_to_minutes(slot_end) - _time_to_minutes(slot_start)
+                        if slot_minutes < duration:
+                            continue
+
+                        task_start = slot_start
+                        task_end = _minutes_to_time(_time_to_minutes(slot_start) + duration)
+
+                        day_offset = day_map.get(day.lower(), 0)
+                        block_date = week_date + timedelta(days=day_offset)
+
+                        block = ScheduleBlock(
+                            week_schedule_id=schedule.id,
+                            task_id=task.id,
+                            goal_id=goal.id,
+                            type="GOAL_TASK",
+                            day=day,
+                            block_date=block_date,
+                            start_time=task_start,
+                            end_time=task_end,
+                            label=task.text,
+                            task_description=task.description or "",
+                            output_definition=task.output or "",
+                            status="SCHEDULED",
+                        )
+                        self.db.add(block)
+
+                        remaining_start = task_end
+                        remaining_end = slot_end
+                        if _time_to_minutes(remaining_start) < _time_to_minutes(remaining_end):
+                            slots[si] = (remaining_start, remaining_end)
+                        else:
+                            slots.pop(si)
+
+                        day_used[day] += duration
+                        budget_used += duration
+                        placed = True
+                        break
+
+                    if placed:
+                        break
+
+    def _compute_free_slots(self, life_blocks_by_day, day_start="06:00", day_end="23:00"):
+        day_order = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
+        free = {}
+
+        for day in day_order:
+            raw = life_blocks_by_day.get(day, [])
+            flat_occupied = []
+            for occ_start, occ_end in raw:
+                occ_s = _time_to_minutes(occ_start)
+                occ_e = _time_to_minutes(occ_end)
+                if occ_e <= occ_s:
+                    flat_occupied.append((occ_s, 24 * 60))
+                    flat_occupied.append((0, occ_e))
+                else:
+                    flat_occupied.append((occ_s, occ_e))
+
+            flat_occupied.sort()
+
+            slots = []
+            cursor = _time_to_minutes(day_start)
+            end_min = _time_to_minutes(day_end)
+
+            for occ_s, occ_e in flat_occupied:
+                if occ_s >= end_min:
+                    break
+                if occ_e <= cursor:
+                    continue
+                if occ_s > cursor:
+                    slots.append((_minutes_to_time(cursor), _minutes_to_time(min(occ_s, end_min))))
+                cursor = max(cursor, occ_e)
+
+            if cursor < end_min:
+                slots.append((_minutes_to_time(cursor), _minutes_to_time(end_min)))
+
+            free[day] = slots
+
+        return free
 
     async def lock_week(self, week_of: str):
         week_date = datetime.strptime(week_of, "%Y-%m-%d").date()
@@ -113,7 +258,27 @@ class ScheduleService:
         if not schedule:
             raise get_error("NOT_FOUND")
 
-        return self._week_to_dict(schedule)
+        life_blocks_by_day = {}
+        for b in schedule.blocks:
+            if b.type == "LIFE_BLOCK":
+                life_blocks_by_day.setdefault(b.day, []).append((b.start_time, b.end_time))
+
+        for b in schedule.blocks:
+            if b.type == "GOAL_TASK" and b.status in ("SCHEDULED", "ACTIVE"):
+                await self.db.delete(b)
+
+        await self.db.flush()
+
+        day_map = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+        await self._place_goal_tasks(schedule, week_date, life_blocks_by_day, day_map)
+        await self.db.commit()
+
+        full = await self.db.execute(
+            select(WeekSchedule)
+            .options(selectinload(WeekSchedule.blocks))
+            .where(WeekSchedule.id == schedule.id)
+        )
+        return self._week_to_dict(full.scalar_one())
 
     async def move_block(self, block_id: int, new_day: str, new_time: str):
         result = await self.db.execute(
@@ -125,9 +290,24 @@ class ScheduleService:
         if not block:
             raise get_error("NOT_FOUND")
 
+        duration = _time_to_minutes(block.end_time) - _time_to_minutes(block.start_time)
+        if duration <= 0:
+            duration = 60
+
         block.day = new_day
         block.start_time = new_time
+        block.end_time = _minutes_to_time(_time_to_minutes(new_time) + duration)
         block.status = "SCHEDULED"
+
+        week_result = await self.db.execute(
+            select(WeekSchedule).where(WeekSchedule.id == block.week_schedule_id)
+        )
+        week = week_result.scalar_one_or_none()
+        if week:
+            day_map = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+            day_offset = day_map.get(new_day.lower(), 0)
+            block.block_date = week.week_of + timedelta(days=day_offset)
+
         await self.db.commit()
         return self._schedule_block_to_dict(block)
 

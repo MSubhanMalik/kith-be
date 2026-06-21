@@ -12,6 +12,7 @@ app = FastAPI(title="Kith API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://localhost:5174"],
+    allow_origin_regex=r"(file|app|tauri|https?://localhost)://.*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

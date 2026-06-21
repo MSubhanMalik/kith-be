@@ -27,3 +27,8 @@ class MoveTaskRequest(BaseModel):
 
 class ChatMessageRequest(BaseModel):
     message: str
+    page_context: Optional[dict] = None
+
+
+class UpdateSummaryRequest(BaseModel):
+    summary_line: str

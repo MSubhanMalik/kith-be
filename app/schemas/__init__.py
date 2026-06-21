@@ -5,4 +5,4 @@ from .goal import (
     CreateTaskRequest, UpdateTaskRequest, ReorderTasksRequest,
     CreateNoteRequest, UpdateNoteRequest,
 )
-from .schedule import CreateLifeBlockRequest, UpdateLifeBlockRequest, GenerateScheduleRequest, MoveTaskRequest, ChatMessageRequest
+from .schedule import CreateLifeBlockRequest, UpdateLifeBlockRequest, GenerateScheduleRequest, MoveTaskRequest, ChatMessageRequest, UpdateSummaryRequest

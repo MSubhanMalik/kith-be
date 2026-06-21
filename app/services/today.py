@@ -1,4 +1,4 @@
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -26,7 +26,7 @@ class TodayService:
             for tc in completions_result.scalars().all()
         }
 
-        monday = today - __import__("datetime").timedelta(days=today.weekday())
+        monday = today - timedelta(days=today.weekday())
         week_result = await self.db.execute(
             select(WeekSchedule)
             .options(selectinload(WeekSchedule.blocks))
@@ -93,7 +93,8 @@ class TodayService:
             )
             self.db.add(completion)
 
-        block.status = "COMPLETED" if status == "DONE" else "SKIPPED" if status == "MISSED" else block.status
+        status_map = {"DONE": "COMPLETED", "MISSED": "SKIPPED", "PARTIAL": "ACTIVE", "PENDING": "SCHEDULED"}
+        block.status = status_map.get(status, block.status)
         await self.db.commit()
 
         return {
