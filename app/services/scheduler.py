@@ -22,17 +22,17 @@ class ScheduleService:
         self.db = ctx.db
         self.user = ctx.require_user()
 
-    async def get_week(self, week_of: str):
+    async def get_week(self, week_of: str, goal_id: int = None):
         week_date = datetime.strptime(week_of, "%Y-%m-%d").date()
         result = await self.db.execute(
             select(WeekSchedule)
             .options(selectinload(WeekSchedule.blocks))
             .where(WeekSchedule.user_id == self.user.id, WeekSchedule.week_of == week_date)
         )
-        schedule = result.scalar_one_or_none()
+        schedule = result.scalars().first()
         if not schedule:
             return None
-        return self._week_to_dict(schedule)
+        return self._week_to_dict(schedule, goal_id=goal_id)
 
     async def generate_schedule(self, week_of: str):
         week_date = datetime.strptime(week_of, "%Y-%m-%d").date()
@@ -42,14 +42,13 @@ class ScheduleService:
                 WeekSchedule.user_id == self.user.id, WeekSchedule.week_of == week_date
             )
         )
-        existing = existing_result.scalar_one_or_none()
-        if existing:
+        for existing in existing_result.scalars().all():
             from app.models import ScheduleBlock as SB
             await self.db.execute(
                 SB.__table__.delete().where(SB.week_schedule_id == existing.id)
             )
             await self.db.delete(existing)
-            await self.db.flush()
+        await self.db.flush()
 
         schedule = WeekSchedule(
             user_id=self.user.id,
@@ -419,14 +418,17 @@ class ScheduleService:
             raise get_error("NOT_FOUND")
         return block
 
-    def _week_to_dict(self, schedule):
+    def _week_to_dict(self, schedule, goal_id: int = None):
+        blocks = schedule.blocks
+        if goal_id:
+            blocks = [b for b in blocks if b.goal_id == goal_id]
         return {
             "id": schedule.id,
             "weekOf": str(schedule.week_of),
             "status": schedule.status,
             "lockedAt": schedule.locked_at.isoformat() if schedule.locked_at else None,
             "summaryLine": schedule.summary_line or "",
-            "blocks": [self._schedule_block_to_dict(b) for b in schedule.blocks],
+            "blocks": [self._schedule_block_to_dict(b) for b in blocks],
             "createdAt": schedule.created_at.isoformat() if schedule.created_at else None,
             "updatedAt": schedule.updated_at.isoformat() if schedule.updated_at else None,
         }

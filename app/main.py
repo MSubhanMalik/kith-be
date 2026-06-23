@@ -40,3 +40,14 @@ async def health():
 async def list_agent_tools():
     from app.agent import get_tool_schemas
     return {"tools": get_tool_schemas()}
+
+
+@app.get("/api/exports/download/{filename}")
+async def download_export(filename: str):
+    import os
+    import tempfile
+    from fastapi.responses import FileResponse
+    path = os.path.join(tempfile.gettempdir(), "kith_exports", filename)
+    if not os.path.exists(path):
+        return {"error": "File not found"}
+    return FileResponse(path, filename=filename, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")

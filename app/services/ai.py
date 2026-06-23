@@ -1,4 +1,6 @@
+import asyncio
 import json
+import traceback
 import time as timer
 from datetime import datetime
 
@@ -7,7 +9,6 @@ from sqlalchemy import select
 from app.models import AIRun, Goal
 from app.config import settings
 from app.services.llm import LLMClient
-from app.services.task import TaskService
 from app.services.nudge import NudgeService
 from app.services.context_builder import ContextBuilder
 
@@ -56,98 +57,34 @@ class AIService:
         ai_run.completed_at = datetime.utcnow()
         await self.db.commit()
 
-    async def break_goal_into_tasks(self, goal_id: int):
+    async def start_goal_breakdown(self, goal_id: int) -> dict:
         result = await self.db.execute(
             select(Goal).where(Goal.id == goal_id, Goal.user_id == self.user.id, Goal.status != "DELETED")
         )
         goal = result.scalar_one_or_none()
         if not goal:
-            return []
+            return {"error": "Goal not found"}
 
         if not settings.OPENROUTER_API_KEY:
-            return []
+            return {"error": "No API key configured"}
 
         ai_run = await self.run("GOAL_BREAKDOWN", json.dumps({"goal_id": goal_id, "label": goal.label}), "GOAL", goal_id)
-        start = timer.time()
 
-        weeks_to_target = 4
-        if goal.target_date:
-            from datetime import date as dateclass
-            days_left = (goal.target_date - dateclass.today()).days
-            weeks_to_target = max(1, min(12, days_left // 7))
+        asyncio.create_task(_run_goal_breakdown(
+            user_id=self.user.id,
+            goal_id=goal_id,
+            ai_run_id=ai_run.id,
+            goal_label=goal.label,
+            goal_status=goal.current_status or "",
+            goal_metric=goal.success_metric or "",
+            goal_target_date=str(goal.target_date) if goal.target_date else None,
+            goal_weekly_hours=float(goal.weekly_hours or 0),
+        ))
 
-        description = goal.current_status or ""
-        success = goal.success_metric or ""
+        return {"ai_run_id": ai_run.id, "status": "processing"}
 
-        prompt = f"""Create a multi-week plan to achieve this goal. Break it into weekly milestones, then into daily tasks.
-
-Goal: {goal.label}
-{f"Description: {description}" if description else ""}
-{f"Success looks like: {success}" if success else ""}
-Target date: {goal.target_date or "No deadline set"}
-Weeks available: {weeks_to_target}
-Weekly hours available: {float(goal.weekly_hours or 0)}h
-
-Rules:
-- Create a plan spanning {min(weeks_to_target, 6)} weeks
-- Each week should have 3-6 tasks that build toward the goal
-- Tasks in week 1 are foundations, later weeks build on earlier work
-- Each task: completable in one sitting (30-120 minutes)
-- Assign each task a day (Mon, Tue, Wed, Thu, Fri, Sat) — spread across the week
-- Assign each task a start time in HH:MM 24-hour format (e.g. "09:00", "14:30"). Spread tasks throughout the day, don't stack them all at the same time.
-- Be specific and actionable: "Read chapter 1 of [topic]" not "Study"
-- Include what "done" looks like for each task
-- Earlier weeks = learning/setup, later weeks = building/executing
-
-Return JSON:
-{{"tasks": [{{"text": "...", "description": "...", "output": "...", "estimatedMinutes": 60, "dayOfWeek": "Mon", "weekNumber": 1, "scheduledTime": "09:00"}}]}}"""
-
-        llm = LLMClient()
-        try:
-            response = await llm.chat_with_fallback(
-                messages=[
-                    {"role": "system", "content": "You are a project planning assistant. Return ONLY a JSON object, no other text. Keep task text under 10 words. Keep descriptions under 20 words. Be concise."},
-                    {"role": "user", "content": prompt},
-                ],
-                model=settings.OPENROUTER_MODEL_SMART,
-                temperature=0.5,
-                max_tokens=4096,
-            )
-
-            content = response.choices[0].message.content or ""
-            content = content.strip()
-            if content.startswith("```"):
-                content = content.split("\n", 1)[-1] if "\n" in content else content[3:]
-                if content.endswith("```"):
-                    content = content[:-3].strip()
-
-            tasks_data = json.loads(content)
-            if isinstance(tasks_data, dict):
-                tasks_data = tasks_data.get("tasks", [])
-
-            task_service = TaskService(self.ctx)
-            created = []
-            for t in tasks_data:
-                task_result = await task_service.create_task(goal_id, {
-                    "text": t.get("text", "Unnamed task"),
-                    "description": t.get("description"),
-                    "output": t.get("output"),
-                    "estimated_minutes": t.get("estimatedMinutes", 60),
-                    "day_of_week": t.get("dayOfWeek"),
-                    "scheduled_time": t.get("scheduledTime"),
-                    "week_number": t.get("weekNumber", 1),
-                    "is_auto_generated": True,
-                })
-                created.append(task_result)
-
-            tokens = response.usage.total_tokens if response.usage else 0
-            duration_ms = int((timer.time() - start) * 1000)
-            await self.complete_run(ai_run.id, json.dumps(created, default=str), tokens, duration_ms)
-            return created
-
-        except Exception as e:
-            await self.fail_run(ai_run.id, str(e))
-            return []
+    async def break_goal_into_tasks(self, goal_id: int):
+        return await self.start_goal_breakdown(goal_id)
 
     async def generate_cat_message(self, trigger: str = "on_demand"):
         if not settings.OPENROUTER_API_KEY:
@@ -215,3 +152,132 @@ Return only the summary line. No quotes."""
             return response.choices[0].message.content.strip().strip('"')
         except Exception:
             return ""
+
+
+async def _run_goal_breakdown(
+    user_id: int,
+    goal_id: int,
+    ai_run_id: int,
+    goal_label: str,
+    goal_status: str,
+    goal_metric: str,
+    goal_target_date: str | None,
+    goal_weekly_hours: float,
+):
+    from app.db.database import async_session
+
+    start = timer.time()
+
+    async with async_session() as db:
+        try:
+            description = goal_status
+            weeks_to_target = 4
+            if goal_target_date:
+                from datetime import date as dateclass
+                days_left = (dateclass.fromisoformat(goal_target_date) - dateclass.today()).days
+                weeks_to_target = max(1, min(16, days_left // 7))
+
+            import re
+            week_match = re.search(r'(\d+)[\s-]*(?:to\s*\d+\s*)?weeks?', description.lower())
+            if week_match:
+                weeks_to_target = int(week_match.group(1))
+            success = goal_metric
+
+            prompt = f"""Extract a concrete daily task schedule from the user's goal and description. Follow the user's plan exactly — do not invent your own structure. If the user described a specific order or curriculum, follow it faithfully.
+
+Goal: {goal_label}
+{f"User's description and plan: {description}" if description else ""}
+{f"Success looks like: {success}" if success else ""}
+Target date: {goal_target_date or "No deadline set"}
+Weeks available: {weeks_to_target}
+Weekly hours available: {goal_weekly_hours}h
+
+Rules:
+- Span exactly {weeks_to_target} weeks
+- Use ALL 7 days per week: Mon, Tue, Wed, Thu, Fri, Sat, Sun — unless the user says otherwise
+- Each day should have 1-2 tasks
+- Each task: one focused session (30-120 minutes)
+- Assign each task a start time in HH:MM format. Spread across the day.
+- Follow the user's described sequence exactly. If they said "first HTML, then CSS, then JS", do that order.
+- Match the user's pace. If they said "beginner" or "take it slow", make early tasks small and simple.
+- Task text should be a concrete action, not a topic. "Build chess board with HTML table" not "Learn HTML".
+- Output = what proves this task is done.
+- If the user described specific sub-steps, turn each sub-step into its own task on its own day.
+
+Return JSON:
+{{"tasks": [{{"text": "...", "description": "...", "output": "...", "estimatedMinutes": 60, "dayOfWeek": "Mon", "weekNumber": 1, "scheduledTime": "09:00"}}]}}"""
+
+            llm = LLMClient()
+            response = await llm.chat_with_fallback(
+                messages=[
+                    {"role": "system", "content": "You are a project planning assistant. Return ONLY a valid JSON object, no markdown, no explanation. Keep task text under 12 words. Keep descriptions under 25 words."},
+                    {"role": "user", "content": prompt},
+                ],
+                model=settings.OPENROUTER_MODEL_SMART,
+                temperature=0.3,
+                max_tokens=8192,
+            )
+
+            content = response.choices[0].message.content or ""
+            content = content.strip()
+            if content.startswith("```"):
+                content = content.split("\n", 1)[-1] if "\n" in content else content[3:]
+                if content.endswith("```"):
+                    content = content[:-3].strip()
+
+            tasks_data = json.loads(content)
+            if isinstance(tasks_data, dict):
+                tasks_data = tasks_data.get("tasks", [])
+
+            from app.services.task import TaskService
+
+            class BgContext:
+                def __init__(self, db, user_id):
+                    self.db = db
+                    self._user_id = user_id
+                def require_user(self):
+                    class FakeUser:
+                        id = self._user_id
+                    return FakeUser()
+
+            bg_ctx = BgContext(db, user_id)
+            task_service = TaskService(bg_ctx)
+            created = []
+            for t in tasks_data:
+                task_result = await task_service.create_task(goal_id, {
+                    "text": t.get("text", "Unnamed task"),
+                    "description": t.get("description"),
+                    "output": t.get("output"),
+                    "estimated_minutes": t.get("estimatedMinutes", 60),
+                    "day_of_week": t.get("dayOfWeek"),
+                    "scheduled_time": t.get("scheduledTime"),
+                    "week_number": t.get("weekNumber", 1),
+                    "is_auto_generated": True,
+                })
+                created.append(task_result)
+
+            tokens = response.usage.total_tokens if response.usage else 0
+            duration_ms = int((timer.time() - start) * 1000)
+
+            result = await db.execute(select(AIRun).where(AIRun.id == ai_run_id))
+            ai_run = result.scalar_one_or_none()
+            if ai_run:
+                ai_run.status = "COMPLETED"
+                ai_run.output_payload = json.dumps(created, default=str)
+                ai_run.tokens_used = tokens
+                ai_run.duration_ms = duration_ms
+                ai_run.completed_at = datetime.utcnow()
+                await db.commit()
+
+        except Exception as e:
+            traceback.print_exc()
+            try:
+                result = await db.execute(select(AIRun).where(AIRun.id == ai_run_id))
+                ai_run = result.scalar_one_or_none()
+                if ai_run:
+                    ai_run.status = "FAILED"
+                    ai_run.error_message = str(e)
+                    ai_run.completed_at = datetime.utcnow()
+                    await db.commit()
+            except Exception:
+                traceback.print_exc()

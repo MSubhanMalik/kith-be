@@ -8,7 +8,7 @@ class LLMClient:
         self.primary = AsyncOpenAI(
             api_key=settings.OPENROUTER_API_KEY or "not-set",
             base_url="https://openrouter.ai/api/v1",
-            timeout=settings.LLM_REQUEST_TIMEOUT,
+            timeout=None,
         )
 
         self.fallback = None
@@ -16,7 +16,7 @@ class LLMClient:
             self.fallback = AsyncOpenAI(
                 api_key=settings.GROQ_API_KEY,
                 base_url="https://api.groq.com/openai/v1",
-                timeout=settings.LLM_REQUEST_TIMEOUT,
+                timeout=None,
             )
 
     async def chat(self, messages, model=None, tools=None, response_format=None, temperature=0.7, max_tokens=2048):

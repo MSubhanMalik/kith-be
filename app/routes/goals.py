@@ -45,12 +45,13 @@ async def reorder_goals(body: ReorderGoalsRequest, ctx: Context = Depends(get_co
     return StandardResponse(data=None, message="Goals reordered")
 
 
+
 @router.post("/{goal_id}/breakdown", response_model=StandardResponse)
 async def breakdown_goal(goal_id: int, ctx: Context = Depends(get_context)):
     from app.services.ai import AIService
     service = AIService(ctx)
-    tasks = await service.break_goal_into_tasks(goal_id)
-    return StandardResponse(data=tasks, message="Goal broken down into tasks")
+    result = await service.start_goal_breakdown(goal_id)
+    return StandardResponse(data=result, message="Goal breakdown started")
 
 
 @router.get("/{goal_id}/notes", response_model=StandardResponse)
