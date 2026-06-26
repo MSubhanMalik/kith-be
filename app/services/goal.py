@@ -22,6 +22,7 @@ def _pick_color(used_colors: list) -> str:
 class GoalService:
     def __init__(self, ctx):
         self.db = ctx.db
+        self.ctx = ctx
         self.user = ctx.require_user()
 
     async def list_goals(self):
@@ -71,6 +72,13 @@ class GoalService:
         self.db.add(goal)
         await self.db.flush()
         await self.db.commit()
+
+        try:
+            from app.services.ai import AIService
+            await AIService(self.ctx).start_goal_breakdown(goal.id)
+        except Exception:
+            pass
+
         return self._goal_to_dict(goal)
 
     async def update_goal(self, goal_id: int, data: dict):

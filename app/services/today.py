@@ -10,6 +10,7 @@ from app.utils import get_error
 class TodayService:
     def __init__(self, ctx):
         self.db = ctx.db
+        self.ctx = ctx
         self.user = ctx.require_user()
 
     async def get_today(self, target_date: date = None):
@@ -112,6 +113,16 @@ class TodayService:
 
         day_log.night_done_at = datetime.utcnow()
         await self.db.commit()
+
+        try:
+            from app.services.scheduler import ScheduleService
+            scheduler = ScheduleService(self.ctx)
+            today = date.today()
+            monday = today - timedelta(days=today.weekday())
+            await scheduler.reschedule_week(monday.strftime("%Y-%m-%d"))
+        except Exception:
+            pass
+
         return self._log_to_dict(day_log)
 
     async def _get_or_create_log(self, target_date: date):

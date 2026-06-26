@@ -29,6 +29,7 @@ class LLMClient:
         }
         if tools:
             kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
         if response_format:
             kwargs["response_format"] = response_format
 

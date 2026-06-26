@@ -2,7 +2,7 @@ import asyncio
 import json
 import traceback
 import time as timer
-from datetime import datetime
+from datetime import datetime, date, timedelta
 
 from sqlalchemy import select
 
@@ -268,6 +268,15 @@ Return JSON:
                 ai_run.duration_ms = duration_ms
                 ai_run.completed_at = datetime.utcnow()
                 await db.commit()
+
+            try:
+                from app.services.scheduler import ScheduleService
+                scheduler = ScheduleService(bg_ctx)
+                today = date.today()
+                monday = today - timedelta(days=today.weekday())
+                await scheduler.generate_schedule(monday.strftime("%Y-%m-%d"))
+            except Exception:
+                pass
 
         except Exception as e:
             traceback.print_exc()
